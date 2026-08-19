@@ -1,13 +1,37 @@
 from sqlmodel import SQLModel, Session, create_engine
+from sqlalchemy.pool import NullPool
 
 from . import models  # noqa: F401  (register tables on SQLModel.metadata)
 from .config import settings
 
-engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
+
+def _normalize_url(url: str) -> str:
+    # Neon/Vercel hand out postgres:// URLs; SQLAlchemy wants an explicit
+    # driver. psycopg v3 is the only driver we ship.
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
+_db_url = _normalize_url(settings.database_url)
+_is_sqlite = _db_url.startswith("sqlite")
+
+if _is_sqlite:
+    engine = create_engine(_db_url, connect_args={"check_same_thread": False})
+else:
+    # Serverless: no persistent connections across invocations; Neon pooler
+    # (pgbouncer) sits in front, so NullPool + pre-ping keeps it safe.
+    engine = create_engine(_db_url, poolclass=NullPool, pool_pre_ping=True)
 
 
 def _migrate() -> None:
-    """Idempotent column additions for databases created by older versions."""
+    """Idempotent column additions for SQLite databases created by older
+    versions. Postgres databases are created fresh via create_all, which
+    already includes every column."""
+    if not _is_sqlite:
+        return
     with engine.begin() as conn:
         snap_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(pricesnapshot)")}
         for col, ddl in {

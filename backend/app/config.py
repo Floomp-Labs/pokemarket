@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Comma-separated extra browser origins allowed to call the API
     # (e.g. your Vercel domain). localhost:5173 is always allowed.
     cors_origins: str = ""
+    # Bearer token protecting POST /api/collect (Vercel cron / GitHub
+    # Actions). Unset = endpoint is open (fine for local dev only).
+    collect_token: Optional[str] = None
 
 
 settings = Settings()
