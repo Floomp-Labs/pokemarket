@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     alert_z_threshold: float = 1.75
     alert_cooldown_minutes: int = 60
     grade_alert_pct_threshold: float = 6.0
+    # Cross-source price disagreement (%) that counts as an anomaly, and how
+    # long before the same subject can raise another spread alert.
+    alert_spread_pct_threshold: float = 5.0
+    spread_cooldown_minutes: int = 720
+    # US-vs-EU gap (%, Cardmarket FX-adjusted) that counts as exceptional.
+    regional_spread_pct_threshold: float = 25.0
+    eur_usd_rate: float = 1.08
     stale_snapshot_hours: int = 6
     pokemontcg_api_key: Optional[str] = None
     database_url: str = "sqlite:///./pokemon.db"

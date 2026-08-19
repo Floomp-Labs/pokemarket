@@ -7,7 +7,11 @@ from typing import Optional
 import httpx
 from sqlmodel import Session, select
 
-from .agent.detector import detect_anomaly
+from .agent.detector import (
+    detect_anomaly,
+    detect_regional_spread,
+    detect_source_spread,
+)
 from .config import settings
 from .db import engine
 from .models import (
@@ -55,14 +59,22 @@ def _extract_snapshot_fields(card_data: dict, price_type: Optional[str]) -> Opti
     }
 
 
-def _last_alert_ts(session: Session, subject_id: str, subject_type: str):
-    return session.exec(
+def _last_alert_ts(
+    session: Session,
+    subject_id: str,
+    subject_type: str,
+    kinds: Optional[tuple[str, ...]] = None,
+):
+    q = (
         select(Alert.ts)
         .where(Alert.subject_id == subject_id)
         .where(Alert.subject_type == subject_type)
         .order_by(Alert.ts.desc())
         .limit(1)
-    ).first()
+    )
+    if kinds is not None:
+        q = q.where(Alert.kind.in_(kinds))
+    return session.exec(q).first()
 
 
 def _build_alert(subject_id: str, subject_type: str, now, detection) -> Alert:
@@ -253,34 +265,71 @@ async def collect_card(
             last_alert_ts=last_alert,
             now=now,
         )
-        alert = None
+        new_alerts: list[Alert] = []
         if detection is not None:
-            alert = _build_alert(card_id, "card", now, detection)
-            session.add(alert)
-            log.info("ALERT %s", detection.message)
+            new_alerts.append(_build_alert(card_id, "card", now, detection))
+
+        spread = detect_source_spread(
+            f"{card.name} ({card.set_name})",
+            sources,
+            spread_threshold=settings.alert_spread_pct_threshold,
+            cooldown_minutes=settings.spread_cooldown_minutes,
+            last_alert_ts=_last_alert_ts(
+                session, card_id, "card", kinds=("source_spread",)
+            ),
+            now=now,
+        )
+        if spread is not None:
+            new_alerts.append(_build_alert(card_id, "card", now, spread))
+
+        cm_eur = None
+        if fields is not None:
+            cm_eur = fields.get("cm_trend") or fields.get("cm_avg_sell")
+        if cm_eur is None and cm_fallback:
+            cm_eur = cm_fallback.get("cm_trend") or cm_fallback.get("cm_avg_sell")
+        regional = detect_regional_spread(
+            f"{card.name} ({card.set_name})",
+            market,
+            cm_eur,
+            fx_rate=settings.eur_usd_rate,
+            spread_threshold=settings.regional_spread_pct_threshold,
+            cooldown_minutes=settings.spread_cooldown_minutes,
+            last_alert_ts=_last_alert_ts(
+                session, card_id, "card", kinds=("regional_spread",)
+            ),
+            now=now,
+        )
+        if regional is not None:
+            new_alerts.append(_build_alert(card_id, "card", now, regional))
+
+        for a in new_alerts:
+            session.add(a)
+            log.info("ALERT %s", a.message)
 
         # ORM instances expire on commit; capture broadcast fields beforehand.
         price_type = card.price_type
         card_name = card.name
         card_image = card.image_small
         session.commit()
-        alert_payload = None
-        if alert is not None:
-            session.refresh(alert)
-            alert_payload = {
-                "id": alert.id,
-                "subject_id": card_id,
-                "subject_type": "card",
-                "name": card_name,
-                "image_small": card_image,
-                "ts": alert.ts.isoformat(),
-                "kind": alert.kind,
-                "severity": alert.severity,
-                "pct_change": alert.pct_change,
-                "z_score": alert.z_score,
-                "message": alert.message,
-                "acknowledged": False,
-            }
+        alert_payloads = []
+        for a in new_alerts:
+            session.refresh(a)
+            alert_payloads.append(
+                {
+                    "id": a.id,
+                    "subject_id": card_id,
+                    "subject_type": "card",
+                    "name": card_name,
+                    "image_small": card_image,
+                    "ts": a.ts.isoformat(),
+                    "kind": a.kind,
+                    "severity": a.severity,
+                    "pct_change": a.pct_change,
+                    "z_score": a.z_score,
+                    "message": a.message,
+                    "acknowledged": False,
+                }
+            )
 
     await manager.broadcast(
         {
@@ -294,8 +343,8 @@ async def collect_card(
             "price_type": price_type,
         }
     )
-    if alert_payload is not None:
-        await manager.broadcast({"type": "alert", "alert": alert_payload})
+    for payload in alert_payloads:
+        await manager.broadcast({"type": "alert", "alert": payload})
 
 
 async def collect_product(
@@ -398,30 +447,47 @@ async def collect_product(
             last_alert_ts=last_alert,
             now=now,
         )
-        alert = None
+        new_alerts: list[Alert] = []
         if detection is not None:
-            alert = _build_alert(product_id, "product", now, detection)
-            session.add(alert)
-            log.info("ALERT %s", detection.message)
+            new_alerts.append(_build_alert(product_id, "product", now, detection))
+
+        spread = detect_source_spread(
+            f"{name} ({set_name or 'sealed'})",
+            sources,
+            spread_threshold=settings.alert_spread_pct_threshold,
+            cooldown_minutes=settings.spread_cooldown_minutes,
+            last_alert_ts=_last_alert_ts(
+                session, product_id, "product", kinds=("source_spread",)
+            ),
+            now=now,
+        )
+        if spread is not None:
+            new_alerts.append(_build_alert(product_id, "product", now, spread))
+
+        for a in new_alerts:
+            session.add(a)
+            log.info("ALERT %s", a.message)
 
         session.commit()
-        alert_payload = None
-        if alert is not None:
-            session.refresh(alert)
-            alert_payload = {
-                "id": alert.id,
-                "subject_id": product_id,
-                "subject_type": "product",
-                "name": name,
-                "image_small": image,
-                "ts": alert.ts.isoformat(),
-                "kind": alert.kind,
-                "severity": alert.severity,
-                "pct_change": alert.pct_change,
-                "z_score": alert.z_score,
-                "message": alert.message,
-                "acknowledged": False,
-            }
+        alert_payloads = []
+        for a in new_alerts:
+            session.refresh(a)
+            alert_payloads.append(
+                {
+                    "id": a.id,
+                    "subject_id": product_id,
+                    "subject_type": "product",
+                    "name": name,
+                    "image_small": image,
+                    "ts": a.ts.isoformat(),
+                    "kind": a.kind,
+                    "severity": a.severity,
+                    "pct_change": a.pct_change,
+                    "z_score": a.z_score,
+                    "message": a.message,
+                    "acknowledged": False,
+                }
+            )
 
     await manager.broadcast(
         {
@@ -432,8 +498,8 @@ async def collect_product(
             "price_kind": kind,
         }
     )
-    if alert_payload is not None:
-        await manager.broadcast({"type": "alert", "alert": alert_payload})
+    for payload in alert_payloads:
+        await manager.broadcast({"type": "alert", "alert": payload})
 
 
 async def collect_card_grades(pc: PriceChartingClient, card_id: str) -> None:
@@ -502,7 +568,9 @@ async def collect_card_grades(pc: PriceChartingClient, card_id: str) -> None:
             ]
             if moves:
                 pct, grade, old, new = max(moves, key=lambda m: abs(m[0]))
-                last_alert = _last_alert_ts(session, card_id, "card")
+                last_alert = _last_alert_ts(
+                    session, card_id, "card", kinds=("grade_spike", "grade_drop")
+                )
                 cooled = last_alert is None or now - last_alert >= timedelta(
                     minutes=settings.alert_cooldown_minutes
                 )

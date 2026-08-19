@@ -3,7 +3,14 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import mean, pstdev
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
+
+SOURCE_NAMES = {
+    "pokemontcg": "TCGplayer",
+    "tcgcsv": "TCGCSV",
+    "tcgdex": "TCGdex",
+    "pricecharting": "PriceCharting",
+}
 
 
 @dataclass
@@ -83,7 +90,14 @@ def detect_anomaly(
             reversal = abs(_pct(new_price, short_mu)) >= pct_threshold / 2
 
     pct_hit = abs(pct_prev) >= pct_threshold
-    z_hit = z is not None and abs(z) >= z_threshold
+    # On near-flat series sigma approaches zero and any move becomes a huge
+    # z-score; require a minimum absolute move so +0.0% "spikes" can't fire.
+    z_min_pct = max(1.0, pct_threshold / 4)
+    z_hit = (
+        z is not None
+        and abs(z) >= z_threshold
+        and abs(pct_prev) >= z_min_pct
+    )
     drift_hit = pct_7d is not None and abs(pct_7d) >= pct_threshold
     if not (pct_hit or z_hit or reversal or drift_hit):
         return None
@@ -116,4 +130,96 @@ def detect_anomaly(
         pct_change=pct_prev,
         z_score=z,
         message=message,
+    )
+
+
+def detect_source_spread(
+    card_label: str,
+    sources: Mapping[str, dict],
+    *,
+    spread_threshold: float = 8.0,
+    cooldown_minutes: int = 720,
+    last_alert_ts: Optional[datetime] = None,
+    now: Optional[datetime] = None,
+) -> Optional[Detection]:
+    """Flag when price sources disagree on the current market price.
+
+    Unlike detect_anomaly this needs no history: a wide gap between sources
+    (e.g. TCGplayer $85 vs TCGCSV $97) is itself an anomaly — stale feeds,
+    mispriced listings, or an arbitrage window. Fires on a single snapshot,
+    which makes it the first signal available for newly tracked subjects.
+    """
+    vals = [
+        (key, float(v["market"]))
+        for key, v in sources.items()
+        if v and v.get("market")
+    ]
+    if len(vals) < 2:
+        return None
+
+    now = now or datetime.now()
+    if last_alert_ts is not None and now - last_alert_ts < timedelta(minutes=cooldown_minutes):
+        return None
+
+    lo = min(vals, key=lambda kv: kv[1])
+    hi = max(vals, key=lambda kv: kv[1])
+    if lo[1] <= 0:
+        return None
+    spread = (hi[1] - lo[1]) / lo[1] * 100.0
+    if spread < spread_threshold:
+        return None
+
+    lo_name = SOURCE_NAMES.get(lo[0], lo[0])
+    hi_name = SOURCE_NAMES.get(hi[0], hi[0])
+    return Detection(
+        kind="source_spread",
+        severity="critical" if spread >= 2 * spread_threshold else "warn",
+        pct_change=round(spread, 2),
+        z_score=None,
+        message=(
+            f"{card_label} source spread: {lo_name} ${lo[1]:.2f} vs "
+            f"{hi_name} ${hi[1]:.2f} ({spread:.1f}% gap)"
+        ),
+    )
+
+
+def detect_regional_spread(
+    card_label: str,
+    usd_market: Optional[float],
+    eur_price: Optional[float],
+    *,
+    fx_rate: float = 1.08,
+    spread_threshold: float = 25.0,
+    cooldown_minutes: int = 720,
+    last_alert_ts: Optional[datetime] = None,
+    now: Optional[datetime] = None,
+) -> Optional[Detection]:
+    """Flag exceptional US-vs-EU price gaps (Cardmarket EUR, FX-adjusted).
+
+    EU prices sit structurally below US ones for modern English cards, so
+    the threshold is deliberately high: this fires only on gaps wide enough
+    to be actionable (e.g. buy EU / sell US), not on the usual discount.
+    """
+    if not usd_market or not eur_price or usd_market <= 0 or eur_price <= 0:
+        return None
+
+    now = now or datetime.now()
+    if last_alert_ts is not None and now - last_alert_ts < timedelta(minutes=cooldown_minutes):
+        return None
+
+    eu_as_usd = eur_price * fx_rate
+    lo, hi = min(usd_market, eu_as_usd), max(usd_market, eu_as_usd)
+    gap = (hi - lo) / lo * 100.0
+    if gap < spread_threshold:
+        return None
+
+    return Detection(
+        kind="regional_spread",
+        severity="critical" if gap >= 2 * spread_threshold else "warn",
+        pct_change=round(gap, 2),
+        z_score=None,
+        message=(
+            f"{card_label} regional spread: US ${usd_market:.2f} vs "
+            f"EU ~${eu_as_usd:.2f} ({gap:.0f}% gap)"
+        ),
     )

@@ -19,7 +19,11 @@ _db_url = _normalize_url(settings.database_url)
 _is_sqlite = _db_url.startswith("sqlite")
 
 if _is_sqlite:
-    engine = create_engine(_db_url, connect_args={"check_same_thread": False})
+    # timeout = sqlite busy timeout: wait up to 30s for the collector's
+    # write lock instead of failing instantly (scripts + API run together).
+    engine = create_engine(
+        _db_url, connect_args={"check_same_thread": False, "timeout": 30}
+    )
 else:
     # Serverless: no persistent connections across invocations; Neon pooler
     # (pgbouncer) sits in front, so NullPool + pre-ping keeps it safe.
