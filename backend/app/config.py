@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     stale_snapshot_hours: int = 6
     pokemontcg_api_key: Optional[str] = None
     database_url: str = "sqlite:///./pokemon.db"
+    # Comma-separated extra browser origins allowed to call the API
+    # (e.g. your Vercel domain). localhost:5173 is always allowed.
+    cors_origins: str = ""
 
 
 settings = Settings()

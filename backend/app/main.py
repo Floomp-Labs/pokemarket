@@ -6,6 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .collector import run_collector
+from .config import settings
 from .db import init_db
 from .routes import alerts, cards, products
 from .ws import manager
@@ -27,9 +28,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Pokemon Card Analytics Agent", lifespan=lifespan)
 
+_extra_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", *_extra_origins],
+    # Vercel production + preview deployments
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
 )
