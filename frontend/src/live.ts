@@ -1,6 +1,13 @@
 import { useEffect } from "react";
 import { useStore } from "./store";
 
+// Dev: same-origin /ws (Vite proxies to the backend). Production: derive
+// from VITE_API_URL (https://api.example.com -> wss://api.example.com/ws).
+const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+const WS_URL = API_BASE
+  ? `${API_BASE.replace(/^http/, "ws")}/ws`
+  : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+
 export function useLiveSocket() {
   const applyTick = useStore((s) => s.applyTick);
   const applyProductTick = useStore((s) => s.applyProductTick);
@@ -14,8 +21,7 @@ export function useLiveSocket() {
     let timer: number | undefined;
 
     const connect = () => {
-      const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws = new WebSocket(WS_URL);
       ws.onopen = () => {
         retries = 0;
         setConnected(true);
